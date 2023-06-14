@@ -1,5 +1,4 @@
 import os
-# os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 import torch
 from torch.utils.data import Dataset, DataLoader
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPT2ForSequenceClassification
@@ -15,10 +14,10 @@ parser.add_argument('--ppo_epochs', type=int, default=50, help='Number of PPO ep
 parser.add_argument('--lr', type=float, default=9e-6, help='Learning rate')
 parser.add_argument('--beta', type=float, default=0.02, help='Beta for KL penalty')
 # parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
-parser.add_argument('--batch_size', type=int, default=8, help='Batch size')
+parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
 parser.add_argument('--ppo_clip_ratio', type=float, default=0.2, help='PPO clip ratio')
 # parser.add_argument('--mini_batch_size', type=int, default=64, help='Mini-batch size')
-parser.add_argument('--mini_batch_size', type=int, default=4, help='Mini-batch size')
+parser.add_argument('--mini_batch_size', type=int, default=2, help='Mini-batch size')
 parser.add_argument('--seed', type=int, default=42, help='Random seed')
 args = parser.parse_args()
 
@@ -68,8 +67,27 @@ def generate_text(model, instruction, max_length=1023):
     encoded_inputs = tokenizer.encode_plus(instruction, return_tensors='pt', max_length=max_length, truncation=True)
     inputs = encoded_inputs['input_ids'].to(device)
     attention_mask = encoded_inputs['attention_mask'].to(device)
-    outputs = model.module.generate(inputs, attention_mask=attention_mask, max_length=max_length, do_sample=True, pad_token_id=tokenizer.pad_token_id, eos_token_id = tokenizer.eos_token_id, temperature=1.0)
-    # outputs = model.generate(inputs, attention_mask=attention_mask, max_length=max_length, do_sample=True, pad_token_id=tokenizer.pad_token_id, eos_token_id = tokenizer.eos_token_id, temperature=1.0)
+    try:
+        outputs = model.module.generate(
+            inputs,
+            attention_mask=attention_mask,
+            max_length=max_length,
+            do_sample=True,
+            pad_token_id=tokenizer.pad_token_id,
+            eos_token_id = tokenizer.eos_token_id,
+            temperature=1.0,
+            num_beams=5,
+            no_repeat_ngram_size=2,
+            early_stopping=True
+        )
+    except:
+        print('Error in generating text')
+        print('Instruction: ', instruction)
+        print('Input: ', inputs)
+        print('Input shape: ', inputs.shape)
+        print('Attention mask: ', attention_mask)
+        print('Max length: ', max_length)
+        raise
     return [inputs, outputs]
 
 
@@ -89,8 +107,7 @@ def get_log_prob(model, instruction_ids, interaction_ids):
     interaction_len = interaction_ids.size(1)
 
     # Get the output logits from the model
-    outputs = model.module(interaction_ids)
-    # outputs = model(interaction_ids)
+    outputs = model(interaction_ids)
     logits = outputs.logits[:, :-1, :]  # Exclude the last token
 
     # Get the softmax probabilities from the logits
@@ -125,14 +142,14 @@ class DialogueDataset(Dataset):
 
 
 # Initialize dataloader
-train_dataset = DialogueDataset('data/filter_gen_dataset_mhy_train.json')
-val_dataset = DialogueDataset('data/filter_gen_dataset_mhy_val.json')
+train_dataset = DialogueDataset('data/gen_dataset_mhy_train.json')
+val_dataset = DialogueDataset('data/gen_dataset_mhy_val.json')
 
 train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
 val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
 
 
-def pad_sequence(sequences, max_length=1024, padding_value=0):
+def pad_sequence(sequences, max_length=1023, padding_value=0):
     '''
     Pad a list of variable length Tensors with padding_value to the max length
     Input:
@@ -162,31 +179,31 @@ def calculate_rewards(model, interactions):
     # Pad all interactions to 1024.
     interactions = pad_sequence(interactions, max_length=1024, padding_value=tokenizer.pad_token_id)
     with torch.no_grad():
-        rewards = model.module(interactions).logits.squeeze()
+        rewards = model(interactions).logits.squeeze()
     return rewards
 
 
-def ppo_iter(mini_batch_size, instructions_interactions, advantage):
+def ppo_iter(mini_batch_size, instructions_interactions, reward):
     '''
     Generate mini batches for PPO update
     Input:
         mini_batch_size: int
         instructions_interactions: list of tuple of torch.tensor, the token ids of the instructions and interactions. The length of the list is the batch size
-        advantage: torch.tensor, the advantage of the interactions, the shape is (batch_size, 1)
+        reward: torch.tensor, the reward of the interactions, the shape is (batch_size, 1)
     Output:
-        tuple of two lists and one torch.tensor, the token ids of the instructions, interactions and the advantage
+        tuple of two lists and one torch.tensor, the token ids of the instructions, interactions and the reward
     '''
-    batch_size = advantage.size(0)
+    batch_size = reward.size(0)
     ids = np.random.permutation(batch_size)
     ids = ids[:mini_batch_size * (batch_size // mini_batch_size)]
 
     for i in range(0, len(ids), mini_batch_size):
         batch_ids = ids[i:i + mini_batch_size]
-        yield [instructions_interactions[i][0] for i in batch_ids], [instructions_interactions[i][1] for i in batch_ids], advantage[batch_ids]
+        yield [instructions_interactions[i][0] for i in batch_ids], [instructions_interactions[i][1] for i in batch_ids], reward[batch_ids]
 
 
-def ppo_update(mini_batch_size, instructions_interactions, advantages, clip_param=args.ppo_clip_ratio):
-    for instructions, interactions, advantage in ppo_iter(mini_batch_size, instructions_interactions, advantages):
+def ppo_update(mini_batch_size, instructions_interactions, rewards, clip_param=args.ppo_clip_ratio, beta = args.beta):
+    for instructions, interactions, reward in ppo_iter(mini_batch_size, instructions_interactions, rewards):
         
         # Calculate the log probability of the generated demonstrations
         ppo_log_probs = [get_log_prob(ppo_model, inst, inter) for inst, inter in zip(instructions, interactions)]
@@ -198,12 +215,20 @@ def ppo_update(mini_batch_size, instructions_interactions, advantages, clip_para
         old_log_probs = torch.stack(sft_log_probs)
         old_log_probs = old_log_probs.detach()
         
-        ratio = (new_log_probs - old_log_probs).exp()
+        ratio = (new_log_probs - old_log_probs).exp().clamp(-10, 10)
+        
+        R = reward - beta * (new_log_probs - old_log_probs)
+        advantage = R - R.mean()
         
         surr1 = ratio * advantage
         surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage
 
         loss  = - torch.min(surr1, surr2).mean()
+        print('Ratio: ', ratio)
+        print('surr1: ', surr1)
+        print('surr2: ', surr2)
+        print('advantage: ', advantage)
+        print('loss: ', loss)
         optimizer.zero_grad()
         
         loss.backward()
@@ -223,13 +248,13 @@ for epoch in range(args.ppo_epochs):
 
             # Calculate the reward given interactions
             rewards = calculate_rewards(reward_model, interactions)
+            print('rewards: ', rewards)
 
-        # Calculate the advantages
-        advantages = rewards - rewards.mean()
-        advantages = advantages.reshape(-1, 1)
+        # Reshape the rewards
+        rewards = rewards.reshape(-1, 1)
 
         # Update the model
-        ppo_update(args.mini_batch_size, instructions_interactions, advantages)
+        ppo_update(args.mini_batch_size, instructions_interactions, rewards)
         
     # Evaluation loop
     with torch.no_grad():
