@@ -29,6 +29,7 @@ class PPOTrainer(object):
         self.device_ppo = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.device_sft = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.device_rm  = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
+        self.device_gen = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
 
         # Load the pre-trained reward model
         self.reward_model = GPT2ForSequenceClassification.from_pretrained("models/reward_model", num_labels=1).to(self.device_rm)
@@ -36,13 +37,13 @@ class PPOTrainer(object):
         self.reward_model.config.pad_token_id = self.reward_model.config.eos_token_id
 
         # Load the supervised fine-tuned model
-        # sft_model = GPT2LMHeadModel.from_pretrained("models/sft_model/sft_model_gpt2_with_original_data").to(device)
-        self.sft_model = GPT2LMHeadModel.from_pretrained("gpt2-medium").to(self.device_sft)
+        # self.sft_model = GPT2LMHeadModel.from_pretrained("gpt2-medium").to(self.device_sft)
+        self.sft_model = GPT2LMHeadModel.from_pretrained("models/sft_model/sft_model_gpt2_medium_with_augmentation_data").to(self.device_sft)
         self.sft_model.eval()
 
         # Load the ppo model from supervised fine-tuned model
-        # ppo_model = GPT2LMHeadModel.from_pretrained("models/sft_model/sft_model_gpt2_with_original_data").to(device)
-        self.ppo_model = GPT2LMHeadModel.from_pretrained("gpt2-medium").to(self.device_ppo)
+        # self.ppo_model = GPT2LMHeadModel.from_pretrained("gpt2-medium").to(self.device_ppo)
+        self.ppo_model = GPT2LMHeadModel.from_pretrained("models/sft_model/sft_model_gpt2_medium_with_augmentation_data").to(self.device_ppo)
         self.ppo_model.train()
 
         # Load the tokenizer
@@ -59,6 +60,9 @@ class PPOTrainer(object):
         # Define the dataloader
         self.train_dataloader = train_dataloader
         self.val_dataloader = val_dataloader
+        
+        # Define the mean of reward
+        self.R_mean = torch.tensor(0.0).to(self.device_ppo)
 
     def generate_text(self, model, instruction, max_length=1023, mode="ppo"):
         '''
@@ -75,11 +79,15 @@ class PPOTrainer(object):
         # Assert the mode
         assert mode in ["ppo", "sft"], "mode must be either 'ppo' or 'sft'"
         
-        # Move the inputs to the device
+        # Record the original device
         if mode == "ppo":
-            device = self.device_ppo
+            original_device = self.device_ppo
         else:
-            device = self.device_sft    
+            original_device = self.device_sft  
+            
+        # Move the model to the device
+        device = self.device_gen
+        model = model.to(device)  
         encoded_inputs = self.tokenizer.encode_plus(instruction, return_tensors='pt', max_length=max_length, truncation=True)
         inputs = encoded_inputs['input_ids'].to(device)
         attention_mask = encoded_inputs['attention_mask'].to(device)
@@ -105,6 +113,9 @@ class PPOTrainer(object):
             print('Attention mask: ', attention_mask)
             print('Max length: ', max_length)
             raise
+        
+        # Move the model back to the original device
+        model = model.to(original_device)
         return [inputs, outputs]
 
     def get_log_prob(self, model, instruction_ids, interaction_ids, mode="ppo"):
@@ -184,7 +195,7 @@ class PPOTrainer(object):
             rewards = model(interactions).logits.squeeze()
         return rewards
 
-    def ppo_update(self, mini_batch_size, instructions_interactions, rewards, clip_param=0.2, beta=0.02):
+    def ppo_update(self, mini_batch_size, instructions_interactions, rewards, clip_param=0.2, beta=0.02, smooth_ratio=0.8):
         '''
         Update the PPO model
         Input:
@@ -233,7 +244,8 @@ class PPOTrainer(object):
             ratio = (new_log_probs - old_log_probs).exp().clamp(-10, 10)
             
             R = reward - beta * (new_log_probs - old_log_probs)
-            advantage = R - R.mean()
+            advantage = R - self.R_mean
+            self.R_mean = smooth_ratio * R.detach() + (1-smooth_ratio) * self.R_mean
             
             surr1 = ratio * advantage
             surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage
@@ -254,8 +266,12 @@ class PPOTrainer(object):
         Train the model
         '''
         best_reward = -float('inf')
+        step = 0
+        total_steps = len(self.train_dataloader) * self.args.ppo_epochs
+        eval_times = 5
         for epoch in range(self.args.ppo_epochs):
             for instructions, _, _ in tqdm(self.train_dataloader):
+                step += 1
                 # Generate demonstrations from the ppo model given the input instruction
                 # instructions_interactions is a list of [instruction_ids, interaction_ids]
                 with torch.no_grad():
@@ -270,44 +286,46 @@ class PPOTrainer(object):
                 rewards = rewards.reshape(-1, 1)
 
                 # Update the model
-                self.ppo_update(self.args.mini_batch_size, instructions_interactions, rewards, clip_param=self.args.ppo_clip_ratio, beta = self.args.beta)
+                self.ppo_update(self.args.mini_batch_size, instructions_interactions, rewards, clip_param=self.args.ppo_clip_ratio, beta=self.args.beta, smooth_ratio=self.args.smoothing_ratio)
                 
-            # Evaluation loop
-            with torch.no_grad():
-                avg_reward = 0
-                num_batches = 0
-                for instruction, _, _ in self.val_dataloader:
-                    # Generate demonstrations from the ppo model given the input instruction
-                    instructions_interactions = [self.generate_text(self.ppo_model, i, max_length=self.lm_max_length-1, mode="ppo") for i in instructions]
-                    interactions = [i[1] for i in instructions_interactions]
-                    
-                    # Calculate the reward given interactions
-                    rewards = self.calculate_rewards(self.reward_model, interactions)
-                    
-                    avg_reward += rewards.mean().item()
-                    num_batches += 1
-                avg_reward /= num_batches
-                print('Epoch {}, average reward {}'.format(epoch, avg_reward))
+                # Evaluation loop
+                if step % (total_steps // eval_times) == 0 or step == total_steps:
+                    with torch.no_grad():
+                        avg_reward = 0
+                        num_batches = 0
+                        for instruction, _, _ in tqdm(self.val_dataloader):
+                            # Generate demonstrations from the ppo model given the input instruction
+                            instructions_interactions = [self.generate_text(self.ppo_model, i, max_length=self.lm_max_length-1, mode="ppo") for i in instructions]
+                            interactions = [i[1] for i in instructions_interactions]
+                            
+                            # Calculate the reward given interactions
+                            rewards = self.calculate_rewards(self.reward_model, interactions)
+                            
+                            avg_reward += rewards.mean().item()
+                            num_batches += 1
+                        avg_reward /= num_batches
+                        print('Step {}, average reward {}'.format(step, avg_reward))
                 
-                # Save the model if the average reward is higher than the previous best
-                if avg_reward > best_reward:
-                    best_reward = avg_reward
-                    self.ppo_model.save_pretrained('models/ppo_model')
+                        # Save the model if the average reward is higher than the previous best
+                        if avg_reward > best_reward:
+                            best_reward = avg_reward
+                            self.ppo_model.save_pretrained('models/ppo_model')
 
 
 if __name__ == '__main__':
     # Argument parser for hyperparameters
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ppo_epochs', type=int, default=50, help='Number of PPO epochs')
+    parser.add_argument('--ppo_epochs', type=int, default=2, help='Number of PPO epochs')
     parser.add_argument('--lr', type=float, default=9e-6, help='Learning rate')
     parser.add_argument('--beta', type=float, default=0.02, help='Beta for KL penalty')
     # parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
-    parser.add_argument('--batch_size', type=int, default=4, help='Batch size')
+    parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
     parser.add_argument('--ppo_clip_ratio', type=float, default=0.2, help='PPO clip ratio')
     # parser.add_argument('--mini_batch_size', type=int, default=64, help='Mini-batch size')
-    parser.add_argument('--mini_batch_size', type=int, default=2, help='Mini-batch size')
+    parser.add_argument('--mini_batch_size', type=int, default=1, help='Mini-batch size')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
     parser.add_argument('--augment', action='store_true', default=True, help='Augment the data')
+    parser.add_argument('--smoothing_ratio', type=float, default=0.5, help='Smoothing ratio')
     args = parser.parse_args()
 
     # Set the seed for reproducibility
@@ -319,7 +337,7 @@ if __name__ == '__main__':
         
     # Initialize dataloader
     train_dataset = DialogueDataset('data/gen_dataset_mhy_train.json', augmentation=args.augment)
-    val_dataset = DialogueDataset('data/gen_dataset_mhy_val.json', augmentation=args.augment)
+    val_dataset = DialogueDataset('data/gen_dataset_mhy_val.json', augmentation=False)
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
     
