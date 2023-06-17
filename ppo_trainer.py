@@ -29,7 +29,7 @@ class PPOTrainer(object):
         self.device_ppo = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
         self.device_sft = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
         self.device_rm  = torch.device("cuda:2" if torch.cuda.is_available() else "cpu")
-        self.device_gen = torch.device("cuda:3" if torch.cuda.is_available() else "cpu")
+        self.device_gen = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
         # Load the pre-trained reward model
         self.reward_model = GPT2ForSequenceClassification.from_pretrained("models/reward_model", num_labels=1).to(self.device_rm)
@@ -52,7 +52,7 @@ class PPOTrainer(object):
         
         # Define the maximum length of the input text
         self.rm_max_length = 1024
-        self.lm_max_length = 1024
+        self.lm_max_length = 512
         
         # Define the optimizer
         self.optimizer = torch.optim.Adam(self.ppo_model.parameters(), lr=self.args.lr)
@@ -246,6 +246,7 @@ class PPOTrainer(object):
             R = reward - beta * (new_log_probs - old_log_probs)
             advantage = R - self.R_mean
             self.R_mean = smooth_ratio * R.detach() + (1-smooth_ratio) * self.R_mean
+            self.R_mean = self.R_mean.detach()
             
             surr1 = ratio * advantage
             surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage
@@ -260,6 +261,8 @@ class PPOTrainer(object):
             
             loss.backward()
             self.optimizer.step()
+            
+            del ppo_log_probs, sft_log_probs, new_log_probs, old_log_probs, reward, ratio, R, advantage, surr1, surr2, loss
 
     def train(self):
         '''
@@ -268,7 +271,7 @@ class PPOTrainer(object):
         best_reward = -float('inf')
         step = 0
         total_steps = len(self.train_dataloader) * self.args.ppo_epochs
-        eval_times = 5
+        eval_times = 10
         for epoch in range(self.args.ppo_epochs):
             for instructions, _, _ in tqdm(self.train_dataloader):
                 step += 1
@@ -315,16 +318,16 @@ class PPOTrainer(object):
 if __name__ == '__main__':
     # Argument parser for hyperparameters
     parser = argparse.ArgumentParser()
-    parser.add_argument('--ppo_epochs', type=int, default=2, help='Number of PPO epochs')
+    parser.add_argument('--ppo_epochs', type=int, default=1, help='Number of PPO epochs')
     parser.add_argument('--lr', type=float, default=9e-6, help='Learning rate')
-    parser.add_argument('--beta', type=float, default=0.02, help='Beta for KL penalty')
+    parser.add_argument('--beta', type=float, default=0.5, help='Beta for KL penalty')
     # parser.add_argument('--batch_size', type=int, default=512, help='Batch size')
     parser.add_argument('--batch_size', type=int, default=1, help='Batch size')
     parser.add_argument('--ppo_clip_ratio', type=float, default=0.2, help='PPO clip ratio')
     # parser.add_argument('--mini_batch_size', type=int, default=64, help='Mini-batch size')
     parser.add_argument('--mini_batch_size', type=int, default=1, help='Mini-batch size')
     parser.add_argument('--seed', type=int, default=42, help='Random seed')
-    parser.add_argument('--augment', action='store_true', default=True, help='Augment the data')
+    parser.add_argument('--augment', action='store_true', default=False, help='Augment the data')
     parser.add_argument('--smoothing_ratio', type=float, default=0.5, help='Smoothing ratio')
     args = parser.parse_args()
 
@@ -336,8 +339,8 @@ if __name__ == '__main__':
         torch.cuda.manual_seed_all(42)
         
     # Initialize dataloader
-    train_dataset = DialogueDataset('data/gen_dataset_mhy_train.json', augmentation=args.augment)
-    val_dataset = DialogueDataset('data/gen_dataset_mhy_val.json', augmentation=False)
+    train_dataset = DialogueDataset('data/ppo_dataset_mhy_train.json', augmentation=args.augment)
+    val_dataset = DialogueDataset('data/ppo_dataset_mhy_val.json', augmentation=args.augment)
     train_dataloader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
     val_dataloader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=True)
     
