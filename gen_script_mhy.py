@@ -76,7 +76,7 @@ with open(OUTPUT_PATH, "a") as f:
             f.write(json.dumps({
                 "guid": question_id,
                 "answer": model_answer
-            }))
+            }) + "\n")
 
 
 # convert jsonl to json
