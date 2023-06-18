@@ -61,7 +61,7 @@ For answers generation, execute `python gen_script_mhy.py`.
     - `models/sft_model`: supervised fine-tuned model with different settings.
     - `models/ppo_model`: PPO model.
 - `src/dialogue.py`: the dataset for dataloader of training sft model process.
-- `answers_mhy_evaluation_*.jsonl`: generated answers of `prompts.json` from different models, including:
+- `answers_mhy_evaluation/`: the folder for generated answers of `prompts.json` from different models, including:
     - `answers_mhy_evaluation/answers_mhy_ppo_model.jsonl`.
     - `answers_mhy_evaluation/answers_mhy_pretrained_gpt2_medium.jsonl`.
     - `answers_mhy_evaluation/answers_mhy_sft_model_gpt2_medium_with_augmentation_data.jsonl`.
