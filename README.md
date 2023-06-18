@@ -53,5 +53,5 @@ The txt file specifying the python versions.
 ### requirements.txt
 The txt file specifying the package versions.
 
-### final_report_mhy 
+### final_report_mhy.pdf 
 Modern NLP project final report.
