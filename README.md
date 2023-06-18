@@ -56,7 +56,7 @@ For answers generation, execute `python gen_script_mhy.py`.
     - `data/ppo/*`: the training and validation datasets for ppo model.
     - `data/sft/*`: the training and validation datasets for sft model.
     - `data/prompts.json`: the sample JSON of the testing questions provided by TAs.
-- `models`: the folder for storing our models.
+- `models/`: the folder for storing our models.
     - `models/reward_model`: finetuned reward model.
     - `models/sft_model`: supervised fine-tuned model with different settings.
     - `models/ppo_model`: PPO model.
