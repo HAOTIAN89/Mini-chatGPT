@@ -1,17 +1,13 @@
-from pyexpat import model
 import torch
-from transformers import GPT2Tokenizer, GPT2LMHeadModel, AdamW, get_cosine_schedule_with_warmup, GPT2ForSequenceClassification
-from torch.utils.data import Dataset, DataLoader
-import nltk
-from rouge_score import rouge_scorer
+from transformers import GPT2Tokenizer, GPT2LMHeadModel
 import json
-import os
 
 
 # constants
-ASSISTANT_MODEL_PATH = "./models/sft_model/sft_model_gpt2_medium_with_augmentation_data"
+MODEL_NAME = "sft_model_gpt2_medium_with_augmentation_data"
+ASSISTANT_MODEL_PATH = "./models/sft_model/" + MODEL_NAME
 TEST_DATASET_PATH = "data/prompts.json"
-OUTPUT_PATH = "answers_mhy.jsonl"
+OUTPUT_PATH = f"answers_mhy_{MODEL_NAME}.jsonl"
 MAX_LEN = 1024
 NUM_BEAMS =  5
 NUM_RETURNED_SEQUENCES = 5
@@ -46,8 +42,9 @@ def assistant_query(question):
      # Decode the answers, return first one that is non-empty
     for output_sentence in output:
         decoded_output_sentence = assistant_tokenizer.decode(output_sentence, skip_special_tokens=True)
-        if decoded_output_sentence != "":
-            return decoded_output_sentence
+        answer = decoded_output_sentence[len(question):].strip()
+        if answer != "":
+            return answer
 
     # if no non-empty response found, return empty string
     return ""
@@ -60,7 +57,8 @@ with open(TEST_DATASET_PATH, "r") as f:
 done_ids = []
 with open(OUTPUT_PATH, mode='r') as f:
     for line in f.readlines():
-        data = json.loads(line.strip())
+        line_ = line.strip()
+        data = json.loads(line_.strip())
         done_ids.append(data["guid"])
 
 # for each datapoint, generate an answer - save to jsonl with append mode (allows for stopping the script while saving partial results)
@@ -78,13 +76,13 @@ with open(OUTPUT_PATH, "a") as f:
                 "answer": model_answer
             }) + "\n")
 
-
 # convert jsonl to json
-predictions = []
-with open(OUTPUT_PATH, mode='r') as f:
-    for line in f.readlines():
-        predictions.append(json.loads(line.strip()))
+if OUTPUT_PATH == "answers_mhy_sft_model_gpt2_medium_with_augmentation_data.jsonl":
+    predictions = []
+    with open(OUTPUT_PATH, mode='r') as f:
+        for line in f.readlines():
+            predictions.append(json.loads(line.strip()))
 
-with open("answers_mhy.json", "w") as f:
-    json.dump(predictions, f)
+    with open("answers_mhy.json", "w") as f:
+        json.dump(predictions, f)
         
