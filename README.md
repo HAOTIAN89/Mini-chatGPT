@@ -1,3 +1,4 @@
+[![Review Assignment Due Date](https://classroom.github.com/assets/deadline-readme-button-24ddc0f5d75046c5622901739e7c5dd533143b0c8e959d652212380cedb1ea36.svg)](https://classroom.github.com/a/YM0Aj0xh)
 # Mini-GPTA: <u>Mini</u> (Distilled) Chat<u>GPT</u>eaching <u>A</u>ssistant
 
 This is the project repository for the final report [*Mini-GPTA: Distilled ChatGPTeaching Assistant for EPFL Courses*](https://github.com/CS-552/project-m3-mhy/blob/main/final_report_mhy.pdf) by MHY Team in EPFL Modern NLP course (CS-552).
